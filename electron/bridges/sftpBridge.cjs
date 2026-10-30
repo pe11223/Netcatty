@@ -134,24 +134,28 @@ const detectEncodingFromList = (items) => {
 };
 
 const resolveEncodingForRequest = (sftpId, requestedEncoding) => {
+  const existing = sftpEncodingState.get(sftpId);
+  // 明御 USM 网关切到 UTF-8 之后必须一直按 UTF-8 收发：路径是资产入口的中文，
+  // 换回 GB18030 编码网关就不认了。
+  if (existing?.usm) return "utf-8";
   const requested = normalizeEncoding(requestedEncoding);
   if (requested && requested !== "auto") {
-    sftpEncodingState.set(sftpId, { requested, resolved: requested });
+    sftpEncodingState.set(sftpId, { requested, resolved: requested, usm: false });
     return requested;
   }
-  const existing = sftpEncodingState.get(sftpId);
   const resolved = existing?.resolved || "utf-8";
-  sftpEncodingState.set(sftpId, { requested: "auto", resolved });
+  sftpEncodingState.set(sftpId, { requested: "auto", resolved, usm: false });
   return resolved;
 };
 
-const updateResolvedEncoding = (sftpId, requestedEncoding, resolvedEncoding) => {
+const updateResolvedEncoding = (sftpId, requestedEncoding, resolvedEncoding, usm) => {
   const requested = normalizeEncoding(requestedEncoding);
   const resolved = normalizeEncoding(resolvedEncoding);
   const finalResolved = resolved === "auto" ? "utf-8" : resolved;
   sftpEncodingState.set(sftpId, {
     requested: requested || "auto",
     resolved: finalResolved,
+    usm: Boolean(usm ?? sftpEncodingState.get(sftpId)?.usm),
   });
   return finalResolved;
 };
@@ -188,6 +192,8 @@ const getResolvedFilenameEncoding = (sftpId, requestedEncoding) => {
   return resolveEncodingForRequest(sftpId, requestedEncoding);
 };
 
+const { installUsmSftpChannel } = require("./sftpBridge/usmGateway.cjs");
+
 const hasSftpChannelApi = (value) =>
   !!value &&
   typeof value.readdir === "function" &&
@@ -221,7 +227,7 @@ const getSftpChannel = async (client, options = {}) => {
   if (client.__netcattyDisposed) return null;
 
   if (hasSftpChannelApi(client.sftp)) {
-    return client.sftp;
+    return installUsmSftpChannel(client, client.sftp);
   }
 
   // sudo sessions must keep using the sudo-bootstrapped SFTP wrapper.
@@ -258,8 +264,8 @@ const getSftpChannel = async (client, options = {}) => {
           try { reopened.close?.(); } catch {}
           return null;
         }
-        client.sftp = reopened;
-        return reopened;
+        client.sftp = installUsmSftpChannel(client, reopened);
+        return client.sftp;
       }
     } catch (err) {
       console.warn("[SFTP] Failed to recover SFTP channel", err?.message || String(err));
@@ -2252,7 +2258,8 @@ async function acquireUploadSftpChannel(client, options = {}) {
     // the existing browse channel (Codex PR review).
     try {
       throwIfAborted(options?.signal);
-      const sftp = await tryOpenSftpChannel(client, options);
+      const rawChannel = await tryOpenSftpChannel(client, options);
+      const sftp = installUsmSftpChannel(client, rawChannel);
       if (sftp && typeof sftp.fastPut === "function") {
         return { sftp, dispose: true };
       }
