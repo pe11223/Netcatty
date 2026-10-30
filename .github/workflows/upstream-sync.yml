@@ -1,0 +1,48 @@
+name: upstream-sync
+
+# 把上游 binaricat/Netcatty 的更新同步到本 fork，全程在 GitHub 上跑，
+# 不碰任何本地检出。main 与 feat/usm-sftp-gateway 都以 rebase 方式跟上游。
+# rebase 冲突时任务失败、不推送，fork 上的分支保持原样。
+
+on:
+  schedule:
+    # 每天 UTC 03:23（北京时间 11:23）。避开整点，减少 GitHub 调度排队。
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/binaricat/Netcatty.git
+
+      - name: Fetch upstream
+        run: git fetch upstream --prune
+
+      - name: Sync main
+        run: |
+          git checkout -B main origin/main
+          git rebase upstream/main
+          git push origin main --force-with-lease
+
+      - name: Sync feat/usm-sftp-gateway
+        run: |
+          git checkout -B feat/usm-sftp-gateway origin/feat/usm-sftp-gateway
+          git rebase upstream/main
+          git push origin feat/usm-sftp-gateway --force-with-lease
