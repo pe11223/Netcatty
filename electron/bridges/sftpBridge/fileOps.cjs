@@ -135,6 +135,16 @@ function createFileOpsApi(ctx) {
       abortScpClientStreams,
     } = require("./scpBackend.cjs");
 
+    const {
+      USM_CHARSET_TOGGLE_RE,
+      switchUsmGatewayToUtf8,
+      parseUsmAssetEntry,
+      getUsmGatewayState,
+      ensureUsmGatewayState,
+      installUsmSftpChannel,
+      toUsmVisiblePath,
+    } = require("./usmGateway.cjs");
+
     async function listSftp(event, payload) {
       const client = sftpClients.get(payload.sftpId);
       if (!client) throw new Error("SFTP session not found");
@@ -236,11 +246,51 @@ function createFileOpsApi(ctx) {
     
       const requestedEncoding = normalizeEncoding(payload.encoding);
       const basePath = payload.path || ".";
-      const pathEncoding = resolveEncodingForRequest(payload.sftpId, requestedEncoding);
+      const assetEntry = parseUsmAssetEntry(basePath);
+      let sftp = await requireSftpChannel(client);
+
+      // 明御 USM 网关先切 UTF-8，再按 UTF-8 编码路径，否则进资产目录必断链
+      let usmUtf8 = Boolean(getUsmGatewayState(client));
+      if (!usmUtf8) {
+        usmUtf8 = await switchUsmGatewayToUtf8(sftp, assetEntry ? "/" : basePath);
+      }
+
+      if (usmUtf8) {
+        const usmState = ensureUsmGatewayState(client);
+        if (assetEntry && usmState?.boundAsset && usmState.boundAsset !== assetEntry.entry) {
+          throw new Error(
+            `USM gateway: this SFTP session is already inside ${usmState.boundAsset}.`
+            + " One SSH connection can only enter a single asset; open a new SFTP"
+            + ` session to browse ${assetEntry.entry}.`,
+          );
+        }
+        if (assetEntry && usmState && !usmState.boundAsset) {
+          // 对入口 REALPATH 一次，网关就把这条连接绑定到该资产上
+          await realpathAsync(sftp, assetEntry.entry);
+          usmState.boundAsset = assetEntry.entry;
+        }
+        // 绑定之后所有远端路径都要按"资产内路径"发出去
+        sftp = installUsmSftpChannel(client, sftp);
+
+        // 绑定资产后网关的 "/" 已经是资产根，列不出资产入口列表。
+        // 界面回到虚拟根目录时给一个只含当前资产的合成列表，导航才自洽。
+        const boundAsset = usmState?.boundAsset;
+        if (boundAsset && (basePath === "/" || basePath === "")) {
+          return [{
+            name: boundAsset.replace(/^\//, ""),
+            type: "directory",
+            linkTarget: null,
+            size: "0 bytes",
+            lastModified: new Date().toISOString(),
+          }];
+        }
+      }
+
+      const pathEncoding = usmUtf8
+        ? updateResolvedEncoding(payload.sftpId, "auto", "utf-8", true)
+        : resolveEncodingForRequest(payload.sftpId, requestedEncoding);
       const encodedPath = encodePath(basePath, pathEncoding);
-    
-      const sftp = await requireSftpChannel(client);
-    
+
       let list;
       try {
         list = await new Promise((resolve, reject) => {
@@ -267,10 +317,18 @@ function createFileOpsApi(ctx) {
         }
       }
     
+      // 明御 USM 网关的字符集切换项是网关实现细节，不显示在文件列表里
+      if (usmUtf8) {
+        list = list.filter((item) => !USM_CHARSET_TOGGLE_RE.test(item.filename || ""));
+      }
+
       // When auto mode, try to detect encoding from list
       // If detection returns null (empty list or can't prove non-UTF-8), preserve the previous encoding
       let detectedEncoding;
-      if (requestedEncoding === "auto") {
+      if (usmUtf8) {
+        // 网关已切到 UTF-8，别再按字节猜
+        detectedEncoding = "utf-8";
+      } else if (requestedEncoding === "auto") {
         const detected = detectEncodingFromList(list);
         if (detected) {
           // Definitive detection (e.g., found GB18030 bytes)
@@ -369,7 +427,9 @@ function createFileOpsApi(ctx) {
       }
       const sftp = await requireSftpChannel(client, { signal, timeoutMs: payload?.timeoutMs });
       const encodedPath = encodePath(payload.path || ".", encoding);
-      return realpathAsync(sftp, encodedPath);
+      const resolved = await realpathAsync(sftp, encodedPath);
+      // 明御 USM：网关回的是资产内路径，界面里要带上资产入口
+      return toUsmVisiblePath(client, resolved);
     }
     
     /**
