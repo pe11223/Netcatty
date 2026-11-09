@@ -29,6 +29,7 @@ import { useI18n } from '../../application/i18n/I18nProvider';
 import { useClipboardBackend } from '../../application/state/useClipboardBackend';
 import { isPrimaryModifierWBinding } from '../../application/state/windowCommandClose';
 import { HotkeyScheme, KeyBinding, matchesKeyBinding } from '../../domain/models';
+import { configureJsonDiagnostics } from '../../infrastructure/monaco/jsonDiagnostics';
 import { pasteForMonacoEditorCommand } from '../../infrastructure/monaco/monacoClipboardPaste';
 import { registerNginxLanguage } from '../../infrastructure/monaco/nginxLanguage';
 import { useNetcattyMonacoTheme } from '../../infrastructure/monaco/useNetcattyMonacoTheme';
@@ -297,6 +298,10 @@ const TextEditorPaneInner: React.FC<TextEditorPaneProps> = ({
 
   const handleEditorMount: OnMount = useCallback((editor, monaco) => {
     editorRef.current = editor;
+
+    // Config files are usually JSONC: comments and trailing commas are valid to
+    // their parsers, so stop Monaco painting them as syntax errors.
+    configureJsonDiagnostics(monaco);
 
     if (initialViewState) editor.restoreViewState(initialViewState);
 
